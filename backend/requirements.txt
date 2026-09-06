@@ -1,0 +1,17 @@
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-multipart==0.0.6
+python-dotenv==1.0.0
+openai-whisper==20231117
+ffmpeg-python==0.2.1
+pydantic==2.5.0
+aiofiles==23.2.1
+requests==2.31.0
+sqlalchemy==2.0.23
+
+# Voice cloning — Coqui XTTS v2 (fallback if Fish Speech unavailable)
+# NOTE: TTS package uses CPML (non-commercial) license for XTTS v2 model weights.
+# Acceptable for portfolio/learning. Switch to Fish Speech (Apache 2.0) if monetizing.
+TTS==0.22.0
+torch==2.1.0
+torchaudio==2.1.0
