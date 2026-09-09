@@ -1,41 +1,48 @@
-# docker-compose.yml — Local development only
-# Runs LibreTranslate + ShortsDub backend together.
-# NOT used in production (each runs as a separate HF Space / Render service).
-#
-# Usage:
-#   docker-compose up --build
-#   Then: cd frontend && npm run dev (in a separate terminal)
+# docker-compose.yml — Echora local dev orchestration
+# Runs LibreTranslate + the FastAPI backend together.
+# Frontend runs separately with: cd frontend && npm run dev
+
+version: "3.9"
 
 services:
+  # ── LibreTranslate (translation service) ──────────────────────────────────
   libretranslate:
     image: libretranslate/libretranslate:latest
+    container_name: echora_libretranslate
     ports:
       - "5000:5000"
+    environment:
+      - LT_LOAD_ONLY=en,hi,te,kn,ml,ta   # only download the language packs we need
+      - LT_DISABLE_WEB_UI=false
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/languages"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 60s  # LibreTranslate takes time to download language models on first run
+      start_period: 60s   # LibreTranslate takes time to download language packs
 
+  # ── Echora FastAPI backend ──────────────────────────────────────────────
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    container_name: echora_backend
     ports:
-      - "8000:8000"
+      - "8000:7860"   # map container port 7860 → host port 8000 for local dev
     environment:
       - TRANSLATE_URL=http://libretranslate:5000/translate
-      - UPLOADS_DIR=uploads
-      - JOBS_DIR=jobs
-      - MAX_FILE_SIZE_MB=500
+      - WHISPER_MODEL=base
+      - UPLOADS_DIR=/app/uploads
+      - OUTPUTS_DIR=/app/outputs
+    volumes:
+      - ./backend/uploads:/app/uploads
+      - ./backend/outputs:/app/outputs
+      - whisper_cache:/root/.cache/whisper   # cache Whisper model between rebuilds
     depends_on:
       libretranslate:
         condition: service_healthy
-    volumes:
-      # Mount uploads/jobs as volumes for persistence across restarts
-      - ./backend/uploads:/app/uploads
-      - ./backend/jobs:/app/jobs
     restart: unless-stopped
-    command: ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+volumes:
+  whisper_cache:

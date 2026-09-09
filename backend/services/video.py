@@ -1,173 +1,176 @@
 """
-FFmpeg helper services for audio/video manipulation.
+services/video.py
 
-Requires ffmpeg to be installed in PATH (or /usr/bin/ffmpeg in Docker).
-All functions run synchronously — wrap in asyncio.to_thread() if needed.
+FFmpeg helpers for audio extraction and audio-replacement in video files.
+
+Requirements:
+  - ffmpeg must be installed and on PATH (on Debian/Ubuntu: apt-get install -y ffmpeg)
+  - pip install ffmpeg-python
 """
-
-import logging
 import os
+import logging
 import subprocess
-import tempfile
+import ffmpeg
 
 logger = logging.getLogger(__name__)
 
-JOBS_DIR = os.getenv("JOBS_DIR", "jobs")
+OUTPUTS_DIR = os.environ.get("OUTPUTS_DIR", "outputs")
+os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
 
-def _jobs_dir(job_id: str) -> str:
-    """Return (and create) the directory for a specific job's files."""
-    path = os.path.join(JOBS_DIR, job_id)
-    os.makedirs(path, exist_ok=True)
-    return path
+def extract_audio(video_path: str, output_wav: str | None = None) -> str:
+    """
+    Extract the audio track from video_path and save it as a 16 kHz mono WAV.
+    Whisper works best with 16 kHz mono audio.
 
+    Args:
+        video_path:  Path to the source video file.
+        output_wav:  Destination path for the extracted WAV.
+                     If None, saved alongside the video with a .wav extension.
 
-def _run_ffmpeg(args: list[str], description: str):
-    """Run an ffmpeg command, raising RuntimeError on failure."""
-    cmd = ["ffmpeg", "-y"] + args  # -y = overwrite without prompting
-    logger.info(f"FFmpeg [{description}]: {' '.join(cmd)}")
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    if result.returncode != 0:
-        logger.error(f"FFmpeg [{description}] failed:\n{result.stderr}")
-        raise RuntimeError(
-            f"FFmpeg failed during '{description}':\n{result.stderr[-1000:]}"
-        )
-    return result
+    Returns:
+        Path to the extracted WAV file.
 
+    Raises:
+        RuntimeError: If ffmpeg exits with a non-zero status.
+    """
+    if output_wav is None:
+        base, _ = os.path.splitext(video_path)
+        output_wav = f"{base}_audio.wav"
 
-def get_duration(file_path: str) -> float:
-    """Return duration of a media file in seconds using ffprobe."""
-    cmd = [
-        "ffprobe", "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        file_path,
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    logger.info(f"Extracting audio: '{video_path}' → '{output_wav}'")
     try:
-        return float(result.stdout.strip())
-    except ValueError:
+        (
+            ffmpeg
+            .input(video_path)
+            .output(
+                output_wav,
+                vn=None,          # no video
+                ar=16000,         # sample rate: 16 kHz (Whisper optimum)
+                ac=1,             # mono
+                acodec="pcm_s16le",
+            )
+            .overwrite_output()
+            .run(quiet=True)
+        )
+    except ffmpeg.Error as exc:
+        raise RuntimeError(
+            f"ffmpeg audio extraction failed: {exc.stderr.decode() if exc.stderr else str(exc)}"
+        ) from exc
+
+    logger.info(f"Audio extracted to '{output_wav}'.")
+    return output_wav
+
+
+def trim_audio(audio_path: str, duration_sec: float = 8.0, output_path: str | None = None) -> str:
+    """
+    Extract a high-SNR, normalized voice reference clip for zero-shot voice cloning.
+    Skips the first second to avoid intro stingers/silence, filters rumble, and normalizes level.
+    """
+    if output_path is None:
+        base, ext = os.path.splitext(audio_path)
+        output_path = f"{base}_ref{ext}"
+
+    logger.info(f"Extracting clean voice reference clip ({duration_sec}s) …")
+    try:
+        (
+            ffmpeg
+            .input(audio_path, ss=1.0, t=duration_sec)
+            .filter('highpass', f=80)
+            .filter('lowpass', f=8000)
+            .filter('loudnorm')
+            .output(output_path, acodec="pcm_s16le", ar=22050, ac=1)
+            .overwrite_output()
+            .run(quiet=True)
+        )
+    except ffmpeg.Error as exc:
+        logger.warning(f"Filtered trim failed, falling back to basic trim: {exc}")
+        (
+            ffmpeg
+            .input(audio_path, ss=0, t=duration_sec)
+            .output(output_path, acodec="pcm_s16le", ar=22050, ac=1)
+            .overwrite_output()
+            .run(quiet=True)
+        )
+
+    logger.info(f"Voice reference clip saved to '{output_path}'.")
+    return output_path
+
+
+
+def get_duration(media_path: str) -> float:
+    """Return the duration of a media file in seconds using ffprobe."""
+    try:
+        probe = ffmpeg.probe(media_path)
+        return float(probe["format"]["duration"])
+    except Exception as exc:
+        logger.warning(f"Could not probe duration for '{media_path}': {exc}")
         return 0.0
 
 
-def extract_audio(video_path: str, job_id: str) -> str:
+def replace_audio(video_path: str, new_audio_path: str, output_path: str | None = None) -> str:
     """
-    Extract audio track from video as a 16kHz mono WAV file.
-    16kHz is optimal for Whisper transcription and XTTS voice cloning.
+    Replace the audio track of video_path with new_audio_path.
+    - Video stream is COPIED (no re-encode) for speed.
+    - Audio stream is re-encoded to AAC for broad compatibility.
+    - If the new audio is shorter than the video, the video is trimmed to match.
+    - If the new audio is longer, it is trimmed to the original video duration.
+
+    Args:
+        video_path:      Source video file (original).
+        new_audio_path:  WAV file with the dubbed audio.
+        output_path:     Destination for the output .mp4.
+                         If None, saved in OUTPUTS_DIR.
 
     Returns:
-        Path to extracted audio WAV file.
+        Path to the remuxed .mp4 file.
+
+    Raises:
+        RuntimeError: If ffmpeg exits with a non-zero status.
     """
-    out_path = os.path.join(_jobs_dir(job_id), "audio.wav")
-    _run_ffmpeg(
-        [
-            "-i", video_path,
-            "-vn",                  # No video
-            "-acodec", "pcm_s16le", # 16-bit PCM WAV
-            "-ar", "16000",         # 16kHz sample rate
-            "-ac", "1",             # Mono
-            out_path,
-        ],
-        description="extract_audio",
+    if output_path is None:
+        base = os.path.splitext(os.path.basename(video_path))[0]
+        output_path = os.path.join(OUTPUTS_DIR, f"{base}_dubbed.mp4")
+
+    video_dur = get_duration(video_path)
+    audio_dur = get_duration(new_audio_path)
+
+    # Use the shorter of the two durations so output is always playable
+    use_dur = min(video_dur, audio_dur) if video_dur > 0 and audio_dur > 0 else None
+
+    logger.info(
+        f"Remuxing video (dur={video_dur:.1f}s) + dubbed audio (dur={audio_dur:.1f}s) "
+        f"→ '{output_path}' (use_dur={use_dur:.1f}s if applicable)"
+        if use_dur else f"→ '{output_path}'"
     )
-    logger.info(f"Audio extracted to {out_path!r}")
-    return out_path
 
+    try:
+        video_in = ffmpeg.input(video_path)
+        audio_in = ffmpeg.input(new_audio_path)
 
-def trim_audio(audio_path: str, job_id: str, duration_sec: float = 8.0) -> str:
-    """
-    Trim an audio file to the first `duration_sec` seconds.
-    Used to prepare the voice reference clip for cloning (6–10 sec is optimal).
+        kwargs = {
+            "vcodec": "copy",
+            "acodec": "aac",
+            "strict": "experimental",
+        }
+        if use_dur:
+            kwargs["t"] = use_dur
 
-    Returns:
-        Path to trimmed audio WAV file.
-    """
-    out_path = os.path.join(_jobs_dir(job_id), "voice_ref.wav")
-    _run_ffmpeg(
-        [
-            "-i", audio_path,
-            "-t", str(duration_sec),  # Duration limit
-            "-acodec", "pcm_s16le",
-            "-ar", "22050",           # XTTS v2 expects 22050 Hz reference
-            "-ac", "1",
-            out_path,
-        ],
-        description="trim_reference",
-    )
-    logger.info(f"Voice reference trimmed to {out_path!r}")
-    return out_path
-
-
-def pad_or_trim_audio(audio_path: str, target_duration: float, job_id: str) -> str:
-    """
-    Ensure dubbed audio matches video duration exactly.
-    - Shorter than target: pad with silence at the end.
-    - Longer than target: trim to target duration.
-    This avoids AV sync issues during muxing.
-
-    Returns:
-        Path to duration-adjusted WAV file.
-    """
-    actual = get_duration(audio_path)
-    out_path = os.path.join(_jobs_dir(job_id), "dubbed_adjusted.wav")
-
-    if abs(actual - target_duration) < 0.1:
-        # Close enough — no adjustment needed
-        return audio_path
-
-    if actual < target_duration:
-        # Pad with silence
-        pad_sec = target_duration - actual
-        logger.info(f"Padding dubbed audio by {pad_sec:.2f}s silence")
-        _run_ffmpeg(
-            [
-                "-i", audio_path,
-                "-af", f"apad=pad_dur={pad_sec}",
-                "-t", str(target_duration),
-                out_path,
-            ],
-            description="pad_audio",
+        (
+            ffmpeg
+            .output(
+                video_in.video,
+                audio_in.audio,
+                output_path,
+                **kwargs,
+            )
+            .overwrite_output()
+            .run(quiet=True)
         )
-    else:
-        # Trim
-        logger.info(f"Trimming dubbed audio from {actual:.2f}s to {target_duration:.2f}s")
-        _run_ffmpeg(
-            ["-i", audio_path, "-t", str(target_duration), out_path],
-            description="trim_audio",
-        )
+    except ffmpeg.Error as exc:
+        raise RuntimeError(
+            f"ffmpeg remux failed: {exc.stderr.decode() if exc.stderr else str(exc)}"
+        ) from exc
 
-    return out_path
-
-
-def replace_audio(video_path: str, new_audio_path: str, job_id: str) -> str:
-    """
-    Remux original video's video stream with new dubbed audio.
-    Video stream is copied (no re-encode). Audio is encoded to AAC.
-
-    Dubbed audio is duration-adjusted to match video before muxing.
-
-    Returns:
-        Path to output MP4 file.
-    """
-    out_path = os.path.join(_jobs_dir(job_id), "output.mp4")
-
-    # Ensure dubbed audio matches video duration exactly
-    video_duration = get_duration(video_path)
-    adjusted_audio = pad_or_trim_audio(new_audio_path, video_duration, job_id)
-
-    _run_ffmpeg(
-        [
-            "-i", video_path,        # Input 0: original video
-            "-i", adjusted_audio,    # Input 1: dubbed audio
-            "-map", "0:v:0",         # Take video from input 0
-            "-map", "1:a:0",         # Take audio from input 1
-            "-c:v", "copy",          # Copy video stream (fast, no quality loss)
-            "-c:a", "aac",           # Encode audio as AAC
-            "-b:a", "192k",          # Audio bitrate
-            "-shortest",             # End when shortest stream ends
-            out_path,
-        ],
-        description="replace_audio",
-    )
-    logger.info(f"Final video written to {out_path!r}")
-    return out_path
+    logger.info(f"Remux complete: '{output_path}'.")
+    return output_path

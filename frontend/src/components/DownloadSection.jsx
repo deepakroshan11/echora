@@ -28,7 +28,7 @@ export default function DownloadSection({ jobId, targetLangName, elapsedSeconds,
       {/* Download button */}
       <a
         href={downloadUrl}
-        download={`shortsdub_${jobId.slice(0, 8)}.mp4`}
+        download={`echora_${jobId.slice(0, 8)}.mp4`}
         className="download-btn"
         id="download-video-button"
         aria-label={`Download dubbed video in ${targetLangName}`}

@@ -1,115 +1,58 @@
 """
-ShortsDub FastAPI Backend
+app.py — Echora FastAPI backend
 
 Endpoints:
-  POST /upload           — accept video + target_language, start async job
-  GET  /status/{job_id}  — poll job status
-  GET  /download/{job_id} — stream completed output video
+  POST /upload          — accept video + target_language, queue job
+  GET  /status/{job_id} — poll job status
+  GET  /download/{job_id} — stream completed output.mp4
   GET  /languages        — list of supported target languages
-  GET  /health           — health check
-
-Heavy models (Whisper + voice clone) are loaded ONCE at startup.
-A concurrency semaphore ensures only one job runs at a time (prevents OOM on free-tier).
 """
-
 import asyncio
 import logging
 import os
-import shutil
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 
 import aiofiles
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
 
-from models import create_job, get_job, init_db, update_job
-from services import transcribe as transcribe_svc
-from services import translate as translate_svc
-from services import video as video_svc
-from services import voice_clone as voice_svc
+from models import Job, create_job, get_db, get_job, init_db, update_job
 
-# ─────────────────────────────────────────────────────────────
-# Configuration
-# ─────────────────────────────────────────────────────────────
-UPLOADS_DIR = os.getenv("UPLOADS_DIR", "uploads")
-JOBS_DIR = os.getenv("JOBS_DIR", "jobs")
-MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "500"))
-
+# ── Configure logging ─────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("echora")
 
-# Single-job concurrency guard — prevents OOM from concurrent ML inference
-_job_semaphore = asyncio.Semaphore(1)
+# ── Directories ───────────────────────────────────────────────────────────────
+UPLOADS_DIR = os.environ.get("UPLOADS_DIR", "uploads")
+OUTPUTS_DIR = os.environ.get("OUTPUTS_DIR", "outputs")
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
-# ─────────────────────────────────────────────────────────────
-# Supported languages
-# ─────────────────────────────────────────────────────────────
-SUPPORTED_LANGUAGES = {
-    "en": "English",
-    "hi": "Hindi",
-    "te": "Telugu",
-    "kn": "Kannada",
-    "ml": "Malayalam",
-    "ta": "Tamil",
-    "fr": "French",
-    "de": "German",
-    "es": "Spanish",
-    "zh": "Chinese (Simplified)",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "pt": "Portuguese",
-    "ar": "Arabic",
-    "ru": "Russian",
-    "tr": "Turkish",
-}
+# ── Supported languages ───────────────────────────────────────────────────────
+SUPPORTED_LANGUAGES = [
+    {"code": "en", "name": "English"},
+    {"code": "hi", "name": "Hindi"},
+    {"code": "te", "name": "Telugu"},
+    {"code": "kn", "name": "Kannada"},
+    {"code": "ml", "name": "Malayalam"},
+]
+SUPPORTED_LANG_CODES = {lang["code"] for lang in SUPPORTED_LANGUAGES}
 
-
-# ─────────────────────────────────────────────────────────────
-# Lifespan — load models at startup
-# ─────────────────────────────────────────────────────────────
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Load heavy ML models and init DB before serving any requests."""
-    logger.info("=== ShortsDub startup: initializing resources ===")
-    os.makedirs(UPLOADS_DIR, exist_ok=True)
-    os.makedirs(JOBS_DIR, exist_ok=True)
-
-    # Initialize SQLite (creates tables if not exist)
-    init_db()
-    logger.info("Database initialized.")
-
-    # Load ML models in a thread pool (blocking I/O, avoid blocking event loop)
-    loop = asyncio.get_event_loop()
-    logger.info("Loading Whisper model (this happens at first import of transcribe module)...")
-    # transcribe module loads Whisper at import time — just force the import
-    await loop.run_in_executor(None, lambda: transcribe_svc.transcribe.__module__)
-
-    logger.info("Loading voice cloning model...")
-    await loop.run_in_executor(None, voice_svc.load_model)
-
-    logger.info("=== ShortsDub startup complete — ready to serve ===")
-    yield
-    logger.info("=== ShortsDub shutting down ===")
-
-
-# ─────────────────────────────────────────────────────────────
-# App
-# ─────────────────────────────────────────────────────────────
+# ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="ShortsDub API",
-    description="Dub Tamil short videos into other languages using open-source AI.",
+    title="Echora API",
+    description="Dub short videos into other languages using AI voice cloning.",
     version="1.0.0",
-    lifespan=lifespan,
 )
 
-# CORS — allow all origins (frontend may be on Vercel, localhost, etc.)
+# CORS — permissive for v1 (tighten to Vercel domain in production if desired)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -118,168 +61,105 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Startup: init DB + pre-load heavy models ──────────────────────────────────
+@app.on_event("startup")
+async def startup():
+    logger.info("=== Echora startup ===")
+    init_db()
+    logger.info("Database initialised.")
 
-# ─────────────────────────────────────────────────────────────
-# Pipeline
-# ─────────────────────────────────────────────────────────────
-async def run_pipeline(job_id: str, video_path: str, target_lang: str):
-    """
-    Full dubbing pipeline — runs as a background task.
-    Guarded by a semaphore so only one job runs at a time (OOM prevention).
-    """
-    async with _job_semaphore:
-        logger.info(f"[{job_id}] Pipeline starting: {video_path!r} → {target_lang}")
-        update_job(job_id, status="processing")
+    # Import services here to trigger model loading at startup (not per-request).
+    # This is the single biggest performance factor on free-tier hardware.
+    logger.info("Loading ML models (Whisper + voice-clone)…")
+    try:
+        import services.transcribe  # noqa: F401  — loads Whisper on import
+        logger.info("Whisper model ready.")
+    except Exception as exc:
+        logger.error(f"Failed to load Whisper: {exc}")
 
-        try:
-            loop = asyncio.get_event_loop()
+    try:
+        import services.voice_clone  # noqa: F401  — loads TTS on import
+        logger.info("Voice-clone model ready.")
+    except Exception as exc:
+        logger.error(f"Failed to load voice-clone model: {exc}")
 
-            # Step 1: Extract audio from video
-            logger.info(f"[{job_id}] Step 1/5: Extracting audio...")
-            audio_path = await loop.run_in_executor(
-                None, video_svc.extract_audio, video_path, job_id
-            )
-
-            # Step 2: Transcribe audio (Tamil → text)
-            logger.info(f"[{job_id}] Step 2/5: Transcribing audio (Tamil)...")
-            original_text = await loop.run_in_executor(
-                None, transcribe_svc.transcribe, audio_path, "ta"
-            )
-            logger.info(f"[{job_id}] Transcription: {original_text[:100]!r}...")
-
-            # Step 3: Translate text
-            logger.info(f"[{job_id}] Step 3/5: Translating ta → {target_lang}...")
-            translated_text = await loop.run_in_executor(
-                None, translate_svc.translate, original_text, "ta", target_lang
-            )
-            logger.info(f"[{job_id}] Translation: {translated_text[:100]!r}...")
-
-            # Step 4: Trim voice reference clip (first 8 seconds of audio)
-            logger.info(f"[{job_id}] Step 4/5: Cloning voice & synthesizing speech...")
-            voice_ref_path = await loop.run_in_executor(
-                None, video_svc.trim_audio, audio_path, job_id, 8.0
-            )
-
-            # Step 5: Voice clone + TTS synthesis
-            dubbed_audio_path = await loop.run_in_executor(
-                None, voice_svc.clone_and_speak,
-                voice_ref_path, translated_text, target_lang, job_id
-            )
-
-            # Step 6: Remux video with dubbed audio
-            logger.info(f"[{job_id}] Step 5/5: Remuxing video with dubbed audio...")
-            output_path = await loop.run_in_executor(
-                None, video_svc.replace_audio, video_path, dubbed_audio_path, job_id
-            )
-
-            update_job(
-                job_id,
-                status="complete",
-                output_path=output_path,
-                completed_at=datetime.utcnow(),
-            )
-            logger.info(f"[{job_id}] ✅ Pipeline complete: {output_path!r}")
-
-        except Exception as exc:
-            logger.error(f"[{job_id}] ❌ Pipeline error: {exc}", exc_info=True)
-            update_job(
-                job_id,
-                status="error",
-                error_message=str(exc),
-                completed_at=datetime.utcnow(),
-            )
+    logger.info("=== Startup complete — ready to accept requests ===")
 
 
-# ─────────────────────────────────────────────────────────────
-# Routes
-# ─────────────────────────────────────────────────────────────
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "service": "shortsdub-backend"}
-
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.get("/languages")
 async def get_languages():
-    """Return supported target language codes and display names."""
-    return {
-        "languages": [
-            {"code": code, "name": name}
-            for code, name in SUPPORTED_LANGUAGES.items()
-        ]
-    }
+    """Return the list of supported target languages for the frontend dropdown."""
+    return {"languages": SUPPORTED_LANGUAGES}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 
 @app.post("/upload")
-async def upload(
+async def upload_video(
     background_tasks: BackgroundTasks,
     video: UploadFile = File(...),
     target_language: str = Form(...),
+    db: Session = Depends(get_db),
 ):
     """
-    Accept a video file upload and start an async dubbing job.
-    Returns a job_id immediately; use GET /status/{job_id} to poll.
+    Accept a video file + target language, save the file, create a job, and
+    kick off background processing.
+
+    Returns: { job_id: str }
     """
-    if target_language not in SUPPORTED_LANGUAGES:
+    # Validate language
+    if target_language not in SUPPORTED_LANG_CODES:
         raise HTTPException(
             status_code=400,
-            detail=f"Unsupported language '{target_language}'. "
-                   f"Supported: {list(SUPPORTED_LANGUAGES.keys())}",
+            detail=f"Unsupported target_language '{target_language}'. "
+                   f"Supported: {sorted(SUPPORTED_LANG_CODES)}",
         )
 
-    # Validate file type loosely (accept anything video/*)
-    content_type = video.content_type or ""
-    if not content_type.startswith("video/") and not video.filename.lower().endswith(
-        (".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v")
-    ):
+    # Validate file type (basic check on content_type)
+    if video.content_type and not video.content_type.startswith("video/"):
         raise HTTPException(
             status_code=400,
-            detail="Please upload a valid video file (mp4, mov, avi, mkv, webm, m4v).",
+            detail=f"Uploaded file does not appear to be a video (content_type={video.content_type}).",
         )
 
-    # Save uploaded file
+    # Save uploaded video
     job_id = str(uuid.uuid4())
-    upload_dir = os.path.join(UPLOADS_DIR, job_id)
-    os.makedirs(upload_dir, exist_ok=True)
+    ext = Path(video.filename).suffix if video.filename else ".mp4"
+    video_filename = f"{job_id}_input{ext}"
+    video_path = os.path.join(UPLOADS_DIR, video_filename)
 
-    suffix = Path(video.filename).suffix or ".mp4"
-    video_path = os.path.join(upload_dir, f"input{suffix}")
-
+    logger.info(f"Saving uploaded video to '{video_path}' …")
     async with aiofiles.open(video_path, "wb") as f:
-        content = await video.read()
-        if len(content) > MAX_FILE_SIZE_MB * 1024 * 1024:
-            raise HTTPException(
-                status_code=413,
-                detail=f"File too large. Maximum size is {MAX_FILE_SIZE_MB} MB.",
-            )
-        await f.write(content)
+        while chunk := await video.read(1024 * 1024):  # 1 MB chunks
+            await f.write(chunk)
+    logger.info("Video saved.")
 
-    logger.info(f"[{job_id}] Video saved to {video_path!r} ({len(content)/1e6:.1f} MB)")
+    # Create job record
+    job = create_job(db, target_lang=target_language, video_path=video_path)
+    job_id = job.id
+    logger.info(f"Job created: {job_id}")
 
-    # Create job record in DB
-    job = create_job(target_lang=target_language, video_path=video_path)
-
-    # Kick off pipeline as background task
+    # Kick off pipeline in background
     background_tasks.add_task(run_pipeline, job_id, video_path, target_language)
 
-    return {
-        "job_id": job_id,
-        "status": "queued",
-        "message": "Upload successful. Processing has started.",
-    }
+    return {"job_id": job_id}
 
 
 @app.get("/status/{job_id}")
-async def get_status(job_id: str):
-    """Poll job status. Status ∈ queued|processing|complete|error."""
-    job = get_job(job_id)
+async def get_status(job_id: str, db: Session = Depends(get_db)):
+    """Poll the status of a dubbing job."""
+    job = get_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+
     return {
         "job_id": job.id,
         "status": job.status,
-        "source_lang": job.source_lang,
-        "target_lang": job.target_lang,
         "error_message": job.error_message,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
@@ -287,22 +167,105 @@ async def get_status(job_id: str):
 
 
 @app.get("/download/{job_id}")
-async def download(job_id: str):
-    """Stream the completed dubbed video. Returns 404 if job is not done."""
-    job = get_job(job_id)
+async def download_video(job_id: str, db: Session = Depends(get_db)):
+    """Stream the completed dubbed video."""
+    job = get_job(db, job_id)
     if not job:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+
     if job.status != "complete":
         raise HTTPException(
-            status_code=409,
-            detail=f"Job is not complete yet (status: {job.status}).",
+            status_code=400,
+            detail=f"Job is not complete yet (status='{job.status}'). Keep polling /status/{job_id}.",
         )
+
     if not job.output_path or not os.path.exists(job.output_path):
         raise HTTPException(
-            status_code=404, detail="Output file not found. The job may have failed."
+            status_code=500,
+            detail="Output file is missing — this is a server-side error.",
         )
+
     return FileResponse(
-        path=job.output_path,
+        job.output_path,
         media_type="video/mp4",
-        filename=f"shortsdub_{job_id[:8]}.mp4",
+        filename=f"echora_{job_id}.mp4",
     )
+
+
+# ── Background pipeline ───────────────────────────────────────────────────────
+
+def run_pipeline(job_id: str, video_path: str, target_lang: str):
+    """
+    Full dubbing pipeline — runs in a background thread via FastAPI BackgroundTasks.
+    Steps:
+      1. Extract audio (ffmpeg)
+      2. Transcribe (Whisper)
+      3. Translate (LibreTranslate)
+      4. Trim reference clip (ffmpeg)
+      5. Clone voice + synthesize (Fish Speech / XTTS v2)
+      6. Remux video + dubbed audio (ffmpeg)
+      7. Update job status to 'complete' (or 'error')
+    """
+    # Use a fresh DB session — BackgroundTasks runs outside the request lifecycle
+    from models import SessionLocal
+    db = SessionLocal()
+
+    def _fail(msg: str):
+        logger.error(f"[{job_id}] Pipeline error: {msg}")
+        update_job(db, job_id, status="error", error_message=msg[:2000])
+        db.close()
+
+    try:
+        update_job(db, job_id, status="processing")
+        logger.info(f"[{job_id}] Pipeline started.")
+
+        # Step 1 — Extract audio
+        from services.video import extract_audio, trim_audio, replace_audio
+        logger.info(f"[{job_id}] Step 1/6: Extracting audio …")
+        audio_path = extract_audio(video_path)
+
+        # Step 2 — Transcribe
+        from services.transcribe import transcribe
+        logger.info(f"[{job_id}] Step 2/6: Transcribing …")
+        original_text = transcribe(audio_path, source_lang="ta")
+        logger.info(f"[{job_id}] Transcript: {original_text[:100]}…")
+
+        # Step 3 — Translate
+        from services.translate import translate
+        logger.info(f"[{job_id}] Step 3/6: Translating ta → {target_lang} …")
+        translated_text = translate(original_text, source_lang="ta", target_lang=target_lang)
+        logger.info(f"[{job_id}] Translation: {translated_text[:100]}…")
+
+        # Step 4 — Create voice reference clip (first 8 sec, silence trimmed by ffmpeg)
+        logger.info(f"[{job_id}] Step 4/6: Creating voice reference clip …")
+        ref_clip_path = trim_audio(audio_path, duration_sec=8.0)
+
+        # Step 5 — Voice clone + TTS
+        from services.voice_clone import clone_and_speak
+        logger.info(f"[{job_id}] Step 5/6: Synthesizing dubbed audio …")
+        dubbed_wav = clone_and_speak(
+            reference_audio_path=ref_clip_path,
+            text=translated_text,
+            target_lang=target_lang,
+        )
+
+        # Step 6 — Remux
+        logger.info(f"[{job_id}] Step 6/6: Remuxing video + dubbed audio …")
+        output_path = replace_audio(video_path, dubbed_wav)
+
+        # Done
+        update_job(
+            db,
+            job_id,
+            status="complete",
+            output_path=output_path,
+            completed_at=datetime.utcnow(),
+        )
+        logger.info(f"[{job_id}] Pipeline complete → '{output_path}'.")
+
+    except Exception as exc:
+        _fail(str(exc))
+        return
+
+    finally:
+        db.close()
