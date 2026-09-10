@@ -16,3 +16,5 @@ backend/outputs/
 *.mp4
 .DS_Store
 Thumbs.db
+scratch_voxai/
+
