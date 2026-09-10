@@ -135,32 +135,34 @@ def replace_audio(video_path: str, new_audio_path: str, output_path: str | None 
     video_dur = get_duration(video_path)
     audio_dur = get_duration(new_audio_path)
 
-    # Use the shorter of the two durations so output is always playable
-    use_dur = min(video_dur, audio_dur) if video_dur > 0 and audio_dur > 0 else None
-
-    logger.info(
-        f"Remuxing video (dur={video_dur:.1f}s) + dubbed audio (dur={audio_dur:.1f}s) "
-        f"→ '{output_path}' (use_dur={use_dur:.1f}s if applicable)"
-        if use_dur else f"→ '{output_path}'"
-    )
+    logger.info(f"Remuxing video (dur={video_dur:.1f}s) + dubbed audio (dur={audio_dur:.1f}s) → '{output_path}'")
 
     try:
+        # If audio and video durations differ slightly, adjust tempo to sync
+        audio_input = ffmpeg.input(new_audio_path)
+        if video_dur > 0 and audio_dur > 0:
+            tempo_ratio = audio_dur / video_dur
+            # Clamp tempo adjustment to safe range (0.85x to 1.25x)
+            if 0.85 <= tempo_ratio <= 1.25 and abs(tempo_ratio - 1.0) > 0.05:
+                logger.info(f"Applying tempo sync factor: {tempo_ratio:.2f}x")
+                audio_input = audio_input.filter("atempo", tempo_ratio)
+
         video_in = ffmpeg.input(video_path)
-        audio_in = ffmpeg.input(new_audio_path)
+        use_dur = video_dur if video_dur > 0 else audio_dur
 
         kwargs = {
             "vcodec": "copy",
             "acodec": "aac",
-            "strict": "experimental",
+            "ar": "44100",
+            "b:a": "192k",
+            "t": use_dur,
         }
-        if use_dur:
-            kwargs["t"] = use_dur
 
         (
             ffmpeg
             .output(
                 video_in.video,
-                audio_in.audio,
+                audio_input,
                 output_path,
                 **kwargs,
             )
