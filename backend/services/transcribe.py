@@ -20,39 +20,36 @@ _model = whisper.load_model(_MODEL_SIZE)
 logger.info("Whisper model loaded.")
 
 
-def transcribe(audio_path: str, source_lang: str = "ta") -> str:
+def transcribe(audio_path: str, source_lang: str = "auto") -> tuple[str, str]:
     """
-    Transcribe audio_path and return the full transcript as a plain string.
-    Uses initial prompt conditioning for Tamil to preserve grammar and punctuation.
+    Transcribe audio_path and return (transcript, detected_lang).
+    Uses automatic language identification if source_lang is 'auto' or None.
     """
-    logger.info(f"Transcribing '{audio_path}' (lang={source_lang}) …")
+    logger.info(f"Transcribing '{audio_path}' (source_lang={source_lang}) …")
     
-    # Prompt priming: guides Whisper on vocabulary, script, and natural sentence punctuation
-    initial_prompt = (
-        "வணக்கம், இந்த வீடியோவில் நாம் பேசும் முக்கியமான விஷயங்கள். தெளிவாக, இயல்பாக கேளுங்கள்."
-        if source_lang == "ta" else None
-    )
-
+    lang = None if source_lang in ("auto", None, "") else source_lang
     try:
         kwargs = {
-            "language": source_lang,
             "fp16": False,
             "verbose": False,
             "task": "transcribe",
-            "temperature": 0.0,  # greedy decoding gives most accurate words, least hallucination
+            "temperature": 0.0,
             "condition_on_previous_text": True,
         }
-        if initial_prompt:
-            kwargs["initial_prompt"] = initial_prompt
+        if lang:
+            kwargs["language"] = lang
+            if lang == "ta":
+                kwargs["initial_prompt"] = "வணக்கம், இந்த வீடியோவில் நாம் பேசும் முக்கியமான விஷயங்கள்."
 
         result = _model.transcribe(audio_path, **kwargs)
     except Exception as exc:
         raise RuntimeError(f"Whisper transcription failed: {exc}") from exc
 
     text = result.get("text", "").strip()
+    detected_lang = result.get("language", "ta")
     if not text:
         raise RuntimeError("Whisper returned an empty transcript — check audio quality.")
 
-    logger.info(f"Transcription complete ({len(text)} chars): {text[:100]}…")
-    return text
+    logger.info(f"Transcription complete (lang={detected_lang}, {len(text)} chars): {text[:100]}…")
+    return text, detected_lang
 

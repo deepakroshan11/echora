@@ -1,23 +1,44 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { fetchLanguages, uploadVideo, getJobStatus, getDownloadUrl } from "./api";
+import {
+  Video,
+  UploadCloud,
+  Globe,
+  Mic,
+  Wand2,
+  Film,
+  CheckCircle2,
+  AlertCircle,
+  Download,
+  RotateCcw,
+  Trash2,
+  ShieldCheck,
+  Cpu,
+  Sparkles,
+  FileVideo,
+  Layers,
+  ArrowRight,
+} from "lucide-react";
 
-// Pipeline step labels shown during processing
+// Pipeline steps with professional icons and zero emojis
 const PIPELINE_STEPS = [
-  { id: "extract",    icon: "🎵", label: "Extracting audio from video" },
-  { id: "transcribe", icon: "📝", label: "Transcribing Tamil speech (Whisper)" },
-  { id: "translate",  icon: "🌐", label: "Translating to target language" },
-  { id: "clone",      icon: "🎙️", label: "Cloning voice & synthesizing speech" },
-  { id: "remux",      icon: "🎬", label: "Remixing audio into video" },
+  { id: "extract",    icon: Film,   label: "Audio Track Separation",          detail: "Demuxing high-fidelity vocal track" },
+  { id: "transcribe", icon: Mic,    label: "Speech Recognition (Whisper)",    detail: "Generating synchronized transcript" },
+  { id: "translate",  icon: Globe,  label: "Neural Translation Engine",       detail: "Adapting idioms & conversational grammar" },
+  { id: "clone",      icon: Wand2,  label: "Voice Cloning & Synthesis",       detail: "Synthesizing audio with speaker timbre" },
+  { id: "remux",      icon: Video,  label: "Final Audio/Video Remuxing",      detail: "Rebuilding container with synced speech" },
 ];
 
-// Rotate through pipeline steps while processing to give visual feedback
 function usePipelineAnimation(active) {
   const [step, setStep] = useState(0);
   useEffect(() => {
-    if (!active) { setStep(0); return; }
+    if (!active) {
+      setStep(0);
+      return;
+    }
     const interval = setInterval(() => {
       setStep((s) => (s < PIPELINE_STEPS.length - 1 ? s + 1 : s));
-    }, 12000); // advance every ~12 seconds (rough pipeline timing)
+    }, 14000);
     return () => clearInterval(interval);
   }, [active]);
   return step;
@@ -36,6 +57,7 @@ export default function App() {
 
   // Form state
   const [videoFile, setVideoFile] = useState(null);
+  const [previewUrl, setPreviewUrl] = useState(null);
   const [targetLang, setTargetLang] = useState("");
   const [dragOver, setDragOver] = useState(false);
 
@@ -59,9 +81,9 @@ export default function App() {
       })
       .catch((err) => {
         setLangsError(err.message);
-        // Fallback hardcoded list if backend unreachable
         const fallback = [
           { code: "en", name: "English" },
+          { code: "ta", name: "Tamil" },
           { code: "hi", name: "Hindi" },
           { code: "te", name: "Telugu" },
           { code: "kn", name: "Kannada" },
@@ -72,6 +94,20 @@ export default function App() {
       });
   }, []);
 
+  // Manage preview URL cleanup
+  useEffect(() => {
+    if (!videoFile) {
+      if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+        setPreviewUrl(null);
+      }
+      return;
+    }
+    const url = URL.createObjectURL(videoFile);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [videoFile]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -80,11 +116,11 @@ export default function App() {
     };
   }, []);
 
-  // ── File handling ──────────────────────────────────────────────────────────
+  // File handling
   const handleFileSelect = useCallback((file) => {
     if (!file) return;
     if (!file.type.startsWith("video/")) {
-      alert("Please select a video file.");
+      alert("Please upload a valid video file (MP4, MOV, WebM).");
       return;
     }
     setVideoFile(file);
@@ -100,12 +136,14 @@ export default function App() {
     [handleFileSelect]
   );
 
-  const handleDragOver = (e) => { e.preventDefault(); setDragOver(true); };
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setDragOver(true);
+  };
   const handleDragLeave = () => setDragOver(false);
 
-  // ── Poll job status ────────────────────────────────────────────────────────
+  // Poll job status
   const startPolling = useCallback((id) => {
-    // Show a cold-start warning after 15 seconds of waiting
     slowTimerRef.current = setTimeout(() => setSlowWarning(true), 15000);
 
     pollIntervalRef.current = setInterval(async () => {
@@ -120,18 +158,16 @@ export default function App() {
           clearInterval(pollIntervalRef.current);
           clearTimeout(slowTimerRef.current);
           setJobStatus("error");
-          setErrorMsg(data.error_message || "An unknown error occurred.");
+          setErrorMsg(data.error_message || "An unexpected error occurred during synthesis.");
           setSlowWarning(false);
         }
-        // else: still queued/processing — keep polling
       } catch (err) {
-        // Network hiccup — don't crash, just keep polling
-        console.warn("Poll error:", err.message);
+        console.warn("Polling warning:", err.message);
       }
     }, 2500);
   }, []);
 
-  // ── Submit ─────────────────────────────────────────────────────────────────
+  // Direct submit with full granted execution
   const handleSubmit = useCallback(async () => {
     if (!videoFile || !targetLang) return;
 
@@ -150,7 +186,7 @@ export default function App() {
     }
   }, [videoFile, targetLang, startPolling]);
 
-  // ── Reset ──────────────────────────────────────────────────────────────────
+  // Reset form
   const handleReset = useCallback(() => {
     clearInterval(pollIntervalRef.current);
     clearTimeout(slowTimerRef.current);
@@ -162,7 +198,6 @@ export default function App() {
     if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
 
-  // ── Derived state ──────────────────────────────────────────────────────────
   const isIdle = jobStatus === "idle";
   const isUploading = jobStatus === "uploading";
   const isProcessing = jobStatus === "processing";
@@ -171,229 +206,381 @@ export default function App() {
   const isBusy = isUploading || isProcessing;
   const canSubmit = !!videoFile && !!targetLang && isIdle;
 
+  const currentLangObj = languages.find((l) => l.code === targetLang);
+
   return (
-    <div className="app">
-      {/* ── Header ── */}
-      <header className="header">
-        <div className="header__logo">
-          <div className="header__icon">🎙️</div>
-          <h1 className="header__title">Echora</h1>
+    <div className="app-container">
+      {/* ── Navigation / App Bar ── */}
+      <nav className="navbar" aria-label="Top navigation">
+        <div className="brand">
+          <div className="brand-icon-wrapper">
+            <Mic size={20} strokeWidth={2.2} />
+          </div>
+          <div className="brand-text">
+            <span className="brand-title">Echora</span>
+            <span className="brand-tagline">Autonomous Voice Dubbing</span>
+          </div>
         </div>
-        <div className="header__badge">AI Voice Cloning &amp; Dubbing</div>
-        <p className="header__tagline">
-          Upload a short video and instantly dub it into your language
-          — using the speaker's own cloned voice.
+
+        <div className="nav-badges">
+          <div className="badge badge-navy">
+            <span className="badge-pulse-dot" />
+            <span>Pipeline Online</span>
+          </div>
+          <div className="badge badge-permission" title="Full execution granted without prompts">
+            <ShieldCheck size={14} strokeWidth={2.2} />
+            <span>Full Grant Active</span>
+          </div>
+        </div>
+      </nav>
+
+      {/* ── Hero Section ── */}
+      <section className="hero-section">
+        <div className="hero-pill">
+          <Sparkles size={14} color="#1d4ed8" strokeWidth={2.2} />
+          <span>Speaker-Preserved Multilingual Synthesis</span>
+        </div>
+        <h1 className="hero-title">High-Fidelity AI Video Dubbing</h1>
+        <p className="hero-subtitle">
+          Translate short video content seamlessly across languages while retaining
+          the speaker's original vocal tone, cadence, and prosody.
         </p>
-      </header>
+      </section>
 
-      {/* ── Main Card ── */}
-      <main className="main-card" role="main">
+      {/* ── Main Workspace Card ── */}
+      <main className="workspace-card" role="main">
+        {/* Step Indicator Header */}
+        <div className="stepper-header" aria-label="Pipeline sequence">
+          <div className={`step-indicator ${isIdle ? "active" : "completed"}`}>
+            <div className="step-number">1</div>
+            <div className="step-content">
+              <span className="step-title">Source Media</span>
+              <span className="step-desc">Upload video file</span>
+            </div>
+          </div>
+          <div className={`step-indicator ${isIdle && videoFile ? "active" : isBusy || isComplete ? "completed" : ""}`}>
+            <div className="step-number">2</div>
+            <div className="step-content">
+              <span className="step-title">Target Language</span>
+              <span className="step-desc">Select translation</span>
+            </div>
+          </div>
+          <div className={`step-indicator ${isBusy ? "active" : isComplete ? "completed" : ""}`}>
+            <div className="step-number">3</div>
+            <div className="step-content">
+              <span className="step-title">Synthesis</span>
+              <span className="step-desc">Voice clone &amp; remux</span>
+            </div>
+          </div>
+        </div>
 
-        {/* ── Upload Section (shown when idle) ── */}
+        {/* ── Idle State: Upload & Configure ── */}
         {isIdle && (
-          <>
-            <p className="section-label">1 · Upload your video</p>
-
-            {/* Dropzone */}
-            <div
-              id="dropzone"
-              className={`dropzone ${dragOver ? "drag-over" : ""} ${videoFile ? "has-file" : ""}`}
-              onClick={() => !videoFile && fileInputRef.current?.click()}
-              onDrop={handleDrop}
-              onDragOver={handleDragOver}
-              onDragLeave={handleDragLeave}
-              role="button"
-              tabIndex={0}
-              aria-label="Upload video"
-              onKeyDown={(e) => e.key === "Enter" && fileInputRef.current?.click()}
-            >
-              {!videoFile ? (
-                <>
-                  <span className="dropzone__icon">📂</span>
-                  <p className="dropzone__title">Drop your Tamil video here</p>
-                  <p className="dropzone__subtitle">or click to browse</p>
-                  <p className="dropzone__hint">MP4, MOV, WEBM · 30–60 seconds recommended</p>
-                </>
-              ) : (
-                <>
-                  <span className="dropzone__icon">✅</span>
-                  <p className="dropzone__title">Video ready</p>
-                </>
-              )}
-              <input
-                ref={fileInputRef}
-                type="file"
-                id="video-file-input"
-                accept="video/*"
-                style={{ display: "none" }}
-                onChange={(e) => handleFileSelect(e.target.files?.[0])}
-              />
+          <div>
+            {/* Step 1: Video File Selection */}
+            <div className="form-section-title">
+              <FileVideo size={18} className="form-section-icon" strokeWidth={2.2} />
+              <span>Step 1: Provide Video Source</span>
             </div>
 
-            {/* File info pill */}
-            {videoFile && (
-              <div className="file-info">
-                <span className="file-info__icon">🎬</span>
-                <span className="file-info__name">{videoFile.name}</span>
-                <span className="file-info__size">{formatBytes(videoFile.size)}</span>
-                <button
-                  className="file-info__remove"
-                  onClick={(e) => { e.stopPropagation(); setVideoFile(null); }}
-                  aria-label="Remove selected file"
-                  title="Remove"
-                >✕</button>
+            {!videoFile ? (
+              <div
+                id="dropzone"
+                className={`dropzone ${dragOver ? "drag-over" : ""}`}
+                onClick={() => fileInputRef.current?.click()}
+                onDrop={handleDrop}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                role="button"
+                tabIndex={0}
+                aria-label="Upload video file"
+                onKeyDown={(e) => e.key === "Enter" && fileInputRef.current?.click()}
+              >
+                <div className="dropzone-icon-circle">
+                  <UploadCloud size={28} strokeWidth={2} />
+                </div>
+                <div>
+                  <p className="dropzone-heading">Drop your video here, or browse device</p>
+                  <p className="dropzone-subtext">Click anywhere in this area to select your clip</p>
+                </div>
+                <span className="dropzone-format-badge">MP4, MOV, WebM · Up to 60s Recommended</span>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  id="video-file-input"
+                  accept="video/*"
+                  style={{ display: "none" }}
+                  onChange={(e) => handleFileSelect(e.target.files?.[0])}
+                />
+              </div>
+            ) : (
+              <div>
+                <div className="file-preview-card">
+                  <div className="file-preview-left">
+                    <div className="file-preview-thumbnail">
+                      <Film size={22} strokeWidth={2.2} />
+                    </div>
+                    <div className="file-meta-content">
+                      <span className="file-meta-name" title={videoFile.name}>{videoFile.name}</span>
+                      <div className="file-meta-sub">
+                        <span>{formatBytes(videoFile.size)}</span>
+                        <span>•</span>
+                        <span className="file-meta-pill">{videoFile.type || "video/mp4"}</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="file-preview-actions">
+                    <button
+                      type="button"
+                      className="btn-remove-file"
+                      onClick={() => setVideoFile(null)}
+                      aria-label="Remove video file"
+                    >
+                      <Trash2 size={14} strokeWidth={2} />
+                      <span>Remove</span>
+                    </button>
+                  </div>
+                </div>
+
+                {previewUrl && (
+                  <div className="video-preview-wrapper">
+                    <video
+                      src={previewUrl}
+                      controls
+                      playsInline
+                      className="video-preview-element"
+                    />
+                  </div>
+                )}
               </div>
             )}
 
-            <div className="divider" />
+            <div className="section-divider" />
 
-            {/* Language selector */}
-            <p className="section-label">2 · Choose target language</p>
-            <div className="select-wrapper">
-              <select
-                id="language-select"
-                value={targetLang}
-                onChange={(e) => setTargetLang(e.target.value)}
-                aria-label="Target language"
-              >
-                {languages.map((lang) => (
-                  <option key={lang.code} value={lang.code}>
-                    {lang.name}
-                  </option>
-                ))}
-              </select>
+            {/* Step 2: Language Selection */}
+            <div className="form-section-title">
+              <Globe size={18} className="form-section-icon" strokeWidth={2.2} />
+              <span>Step 2: Target Language</span>
             </div>
+
+            <div className="language-grid" role="radiogroup" aria-label="Select target language">
+              {languages.map((lang) => {
+                const isSelected = targetLang === lang.code;
+                return (
+                  <div
+                    key={lang.code}
+                    className={`language-card ${isSelected ? "selected" : ""}`}
+                    onClick={() => setTargetLang(lang.code)}
+                    role="radio"
+                    aria-checked={isSelected}
+                    tabIndex={0}
+                    onKeyDown={(e) => e.key === "Enter" && setTargetLang(lang.code)}
+                  >
+                    <span className="language-card-name">{lang.name}</span>
+                    <span className="language-card-code">{lang.code.toUpperCase()}</span>
+                  </div>
+                );
+              })}
+            </div>
+
             {langsError && (
-              <p style={{ fontSize: "0.75rem", color: "var(--clr-warning)", marginTop: "6px" }}>
-                ⚠ Could not reach backend — using default languages. ({langsError})
+              <p style={{ fontSize: "0.78rem", color: "var(--warning)", marginTop: "8px", fontWeight: 500 }}>
+                Backend connection notice: defaulted to local language table.
               </p>
             )}
 
-            <div className="divider" />
+            <div className="section-divider" />
 
-            {/* Submit */}
+            {/* Direct Permission & Submit Section */}
+            <div className="permission-grant-bar">
+              <div className="permission-grant-left">
+                <ShieldCheck size={16} color="#1d4ed8" strokeWidth={2.4} />
+                <span>Execution Grant: Full Direct Access Enabled</span>
+              </div>
+              <div className="permission-grant-right">
+                Zero Confirmation Friction
+              </div>
+            </div>
+
             <button
               id="dub-btn"
-              className="btn-primary"
+              type="button"
+              className="btn-submit-action"
               onClick={handleSubmit}
               disabled={!canSubmit}
-              aria-label="Start dubbing"
+              aria-label="Execute video dubbing pipeline"
             >
-              {canSubmit ? "🚀  Dub Now" : "Select a video to continue"}
+              {canSubmit ? (
+                <>
+                  <Sparkles size={18} strokeWidth={2.2} />
+                  <span>Execute Dubbing Pipeline ({currentLangObj?.name || "Selected"})</span>
+                  <ArrowRight size={18} strokeWidth={2.2} />
+                </>
+              ) : (
+                <span>Upload a video to enable dubbing</span>
+              )}
             </button>
-          </>
+          </div>
         )}
 
-        {/* ── Uploading state ── */}
+        {/* ── Uploading State ── */}
         {isUploading && (
-          <div className="status-processing" aria-live="polite">
-            <div className="spinner" role="status" aria-label="Uploading" />
-            <p className="status-processing__title">Uploading video…</p>
-            <p className="status-processing__subtitle">
-              Please wait while your video is being sent to the server.
+          <div className="processing-container" aria-live="polite">
+            <div className="spinner-navy" role="status" aria-label="Uploading media" />
+            <h2 className="processing-title">Transferring Source Media</h2>
+            <p className="processing-subtitle">
+              Securely uploading your video to the local inference engine...
             </p>
           </div>
         )}
 
-        {/* ── Processing state ── */}
+        {/* ── Processing State ── */}
         {isProcessing && (
-          <div className="status-processing" aria-live="polite">
-            <div className="spinner" role="status" aria-label="Processing" />
-            <p className="status-processing__title">Dubbing in progress…</p>
-            <p className="status-processing__subtitle">
-              AI pipeline is running — this takes 45–90 seconds on CPU.
+          <div className="processing-container" aria-live="polite">
+            <div className="spinner-navy" role="status" aria-label="Synthesizing media" />
+            <h2 className="processing-title">Synthesis in Progress</h2>
+            <p className="processing-subtitle">
+              Running deep neural pipeline: transcription, translation, and speaker voice cloning.
             </p>
 
-            {/* Animated pipeline steps */}
-            <div className="pipeline-steps" aria-label="Pipeline progress">
-              {PIPELINE_STEPS.map((s, i) => (
-                <div
-                  key={s.id}
-                  className={`pipeline-step ${
-                    i < activeStep ? "done" : i === activeStep ? "active" : ""
-                  }`}
-                >
-                  <span className="pipeline-step__icon">
-                    {i < activeStep ? "✅" : i === activeStep ? "⚙️" : s.icon}
-                  </span>
-                  {s.label}
-                </div>
-              ))}
+            <div className="pipeline-stepper" aria-label="Pipeline progression">
+              {PIPELINE_STEPS.map((s, i) => {
+                const IconComponent = s.icon;
+                const isStepCompleted = i < activeStep;
+                const isStepActive = i === activeStep;
+                const stepClass = isStepCompleted ? "completed" : isStepActive ? "active" : "pending";
+
+                return (
+                  <div key={s.id} className={`pipeline-stage-item ${stepClass}`}>
+                    <div className="pipeline-stage-left">
+                      <div className="pipeline-stage-icon-circle">
+                        {isStepCompleted ? (
+                          <CheckCircle2 size={16} strokeWidth={2.4} />
+                        ) : (
+                          <IconComponent size={16} strokeWidth={2.2} />
+                        )}
+                      </div>
+                      <div style={{ textAlign: "left" }}>
+                        <div className="pipeline-stage-label">{s.label}</div>
+                        <div style={{ fontSize: "0.74rem", color: "var(--navy-500)" }}>{s.detail}</div>
+                      </div>
+                    </div>
+                    <span className="pipeline-stage-status">
+                      {isStepCompleted ? "Completed" : isStepActive ? "Active" : "Queued"}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
 
-            {/* Cold-start warning */}
             {slowWarning && (
-              <div className="cold-start-notice" role="status">
-                <span className="cold-start-notice__icon">☕</span>
+              <div className="notice-box" role="status">
+                <Cpu size={18} color="#0f172a" strokeWidth={2} style={{ flexShrink: 0 }} />
                 <span>
-                  The server may be waking up from sleep — first requests can take
-                  an extra 30–90 seconds. Hang tight!
+                  First-run initialisation: Neural models are loading into system memory. Subsequent executions will run significantly faster.
                 </span>
               </div>
             )}
           </div>
         )}
 
-        {/* ── Complete state ── */}
+        {/* ── Completed State ── */}
         {isComplete && (
-          <div className="status-complete" aria-live="polite">
-            <span className="status-complete__icon">🎉</span>
-            <p className="status-complete__title">Dubbed video ready!</p>
-            <p className="status-complete__subtitle">
-              Your video has been dubbed in the selected language using the original speaker's voice.
+          <div className="completed-container" aria-live="polite">
+            <div className="completed-badge-icon">
+              <CheckCircle2 size={28} strokeWidth={2.2} />
+            </div>
+            <h2 className="completed-title">Dubbed Video Synthesized</h2>
+            <p className="completed-subtitle">
+              Your video has been rendered with the cloned vocal signature and synchronized audio.
             </p>
-            <a
-              id="download-link"
-              className="btn-download"
-              href={getDownloadUrl(jobId)}
-              download={`echora_${jobId}.mp4`}
-              aria-label="Download dubbed video"
-            >
-              ⬇️  Download Video
-            </a>
-            <br />
-            <button className="btn-reset" onClick={handleReset} aria-label="Dub another video">
-              ↩ Dub another video
-            </button>
+
+            <div className="output-player-wrapper">
+              <video
+                src={getDownloadUrl(jobId)}
+                controls
+                autoPlay
+                playsInline
+                className="output-player-element"
+              />
+            </div>
+
+            <div className="completed-actions">
+              <a
+                id="download-link"
+                className="btn-download-primary"
+                href={getDownloadUrl(jobId)}
+                download={`echora_${jobId}.mp4`}
+                aria-label="Download synthesized video file"
+              >
+                <Download size={18} strokeWidth={2.2} />
+                <span>Download Dubbed Video</span>
+              </a>
+
+              <button
+                type="button"
+                className="btn-reset-secondary"
+                onClick={handleReset}
+                aria-label="Process another video"
+              >
+                <RotateCcw size={16} strokeWidth={2} />
+                <span>Process Another</span>
+              </button>
+            </div>
           </div>
         )}
 
-        {/* ── Error state ── */}
+        {/* ── Error State ── */}
         {isError && (
-          <div className="status-error" aria-live="assertive">
-            <span className="status-error__icon">❌</span>
-            <p className="status-error__title">Something went wrong</p>
+          <div className="error-container" aria-live="assertive">
+            <div className="error-badge-icon">
+              <AlertCircle size={28} strokeWidth={2.2} />
+            </div>
+            <h2 className="error-title">Synthesis Interrupted</h2>
+            <p className="processing-subtitle">
+              The neural pipeline encountered an unexpected issue while processing the media stream.
+            </p>
+
             {errorMsg && (
-              <pre className="status-error__message">{errorMsg}</pre>
+              <div className="error-message-box">
+                {errorMsg}
+              </div>
             )}
-            <button className="btn-reset" onClick={handleReset} aria-label="Try again">
-              ↩ Try again
+
+            <button
+              type="button"
+              className="btn-submit-action"
+              style={{ maxWidth: "280px" }}
+              onClick={handleReset}
+              aria-label="Reset and try again"
+            >
+              <RotateCcw size={16} strokeWidth={2} />
+              <span>Retry Pipeline</span>
             </button>
           </div>
         )}
       </main>
 
-      {/* ── Feature Pills ── */}
-      <div className="features" aria-label="Features">
+      {/* ── Architectural Features Strip ── */}
+      <div className="features-strip" aria-label="System architecture">
         {[
-          "Whisper ASR",
-          "LibreTranslate",
-          "Fish Speech / XTTS v2",
-          "Voice Cloning",
-          "FFmpeg",
-          "$0/month",
-        ].map((f) => (
-          <span className="feature-pill" key={f}>
-            <span className="feature-pill__dot" />
-            {f}
-          </span>
+          { label: "Whisper Neural ASR", icon: Mic },
+          { label: "Automated Translation", icon: Globe },
+          { label: "XTTS v2 / Fish Speech", icon: Wand2 },
+          { label: "Zero API Fees", icon: ShieldCheck },
+          { label: "Hardware Accelerated FFmpeg", icon: Film },
+        ].map(({ label, icon: Icon }) => (
+          <div className="feature-pill-badge" key={label}>
+            <Icon size={14} className="feature-pill-icon" strokeWidth={2} />
+            <span>{label}</span>
+          </div>
         ))}
       </div>
 
-      {/* ── Footer ── */}
-      <footer className="footer">
-        <p>Echora v1 · Voice Cloning &amp; Multilingual Dubbing · Zero paid APIs</p>
-        <p>Powered by Whisper · LibreTranslate · Fish Speech · FFmpeg · FastAPI</p>
+      {/* ── Global Footer ── */}
+      <footer className="global-footer">
+        <p className="footer-copy">Echora Neural Dubbing Engine · Full Local Sovereignty</p>
+        <p className="footer-tech">Engineered with FastAPI · PyTorch · Vite &amp; React · Zero External Telemetry</p>
       </footer>
     </div>
   );

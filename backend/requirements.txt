@@ -1,6 +1,7 @@
-fastapi==0.104.1
+fastapi>=0.104.1
+starlette>=0.27.0
 uvicorn[standard]==0.24.0
-python-multipart==0.0.6
+python-multipart>=0.0.6
 python-dotenv==1.0.0
 openai-whisper
 ffmpeg-python>=0.2.0
@@ -10,4 +11,8 @@ requests>=2.31.0
 sqlalchemy>=2.0.23
 TTS>=0.22.0
 edge-tts>=7.0.0
+chatterbox-tts>=0.1.7
+soundfile>=0.12.1
+scipy>=1.11.0
+torchaudio>=2.2.0
 

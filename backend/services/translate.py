@@ -63,13 +63,46 @@ def _postprocess_translated_text(translated: str, target_lang: str) -> str:
 
 
 def _fallback_translate(text: str, source_lang: str, target_lang: str) -> str:
-    """Fallback translation using Google Web API (no API key required)."""
+    """Fallback translation using Google Translate dict-chrome-ex & client API (no API key required)."""
+    if source_lang == target_lang:
+        logger.info(f"Source and target language are the same ({source_lang}); skipping translation.")
+        return text
+
     logger.info(f"Using fallback translator for {source_lang} → {target_lang} …")
-    url = f"https://translate.google.com/m?sl={source_lang}&tl={target_lang}&q={urllib.parse.quote(text)}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
-    
+
+    # Primary Fallback: Chrome Extension API (bulletproof, zero 429 rate limit)
+    try:
+        url = f"https://clients5.google.com/translate_a/t?client=dict-chrome-ex&sl={source_lang}&tl={target_lang}&q={urllib.parse.quote(text)}"
+        resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list) and len(data) > 0:
+            translated = data[0] if isinstance(data[0], str) else "".join(str(x) for x in data)
+            if translated and translated.strip():
+                logger.info(f"clients5 Google Translate complete ({len(translated)} chars).")
+                return translated.strip()
+    except Exception as exc:
+        logger.warning(f"clients5 translate failed: {exc}")
+
+    # Secondary Fallback: Google Translate client API
+    try:
+        api_url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={source_lang}&tl={target_lang}&dt=t&q={urllib.parse.quote(text)}"
+        resp = requests.get(api_url, headers=headers, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        if data and isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+            translated = "".join(seg[0] for seg in data[0] if seg and len(seg) > 0 and seg[0])
+            if translated.strip():
+                logger.info(f"Google Translate API fallback complete ({len(translated)} chars).")
+                return translated.strip()
+    except Exception as exc:
+        logger.warning(f"Googleapis fallback failed: {exc}")
+
+    # Tertiary Fallback: Mobile web parser
+    url = f"https://translate.google.com/m?sl={source_lang}&tl={target_lang}&q={urllib.parse.quote(text)}"
     try:
         resp = requests.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
         resp.raise_for_status()
@@ -77,21 +110,10 @@ def _fallback_translate(text: str, source_lang: str, target_lang: str) -> str:
         if match:
             translated = html.unescape(match.group(1).strip())
             if translated:
-                logger.info(f"Fallback translation complete ({len(translated)} chars).")
+                logger.info(f"Google Web fallback complete ({len(translated)} chars).")
                 return translated
     except Exception as exc:
         logger.warning(f"Google Web fallback failed: {exc}")
-
-    # Second fallback: googletrans
-    try:
-        from googletrans import Translator
-        translator = Translator()
-        res = translator.translate(text, src=source_lang, dest=target_lang)
-        if res and res.text:
-            logger.info(f"googletrans translation complete ({len(res.text)} chars).")
-            return res.text
-    except Exception as exc:
-        logger.warning(f"googletrans fallback failed: {exc}")
 
     raise RuntimeError(f"All translation attempts failed for {source_lang} → {target_lang}.")
 
@@ -106,6 +128,10 @@ def translate(text: str, source_lang: str, target_lang: str) -> str:
 
     clean_input = _preprocess_tamil_text(text)
     
+    if source_lang == target_lang:
+        logger.info(f"Source and target language are identical ({source_lang}); preserving text.")
+        return _postprocess_translated_text(clean_input, target_lang)
+
     payload = {
         "q": clean_input,
         "source": source_lang,

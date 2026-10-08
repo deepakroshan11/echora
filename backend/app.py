@@ -14,6 +14,11 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "4"
+import torch
+torch.set_num_threads(4)
+
 import aiofiles
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +43,7 @@ os.makedirs(OUTPUTS_DIR, exist_ok=True)
 # ── Supported languages ───────────────────────────────────────────────────────
 SUPPORTED_LANGUAGES = [
     {"code": "en", "name": "English"},
+    {"code": "ta", "name": "Tamil"},
     {"code": "hi", "name": "Hindi"},
     {"code": "te", "name": "Telugu"},
     {"code": "kn", "name": "Kannada"},
@@ -227,24 +233,23 @@ def run_pipeline(job_id: str, video_path: str, target_lang: str):
         # Step 2 — Transcribe
         from services.transcribe import transcribe
         logger.info(f"[{job_id}] Step 2/6: Transcribing …")
-        original_text = transcribe(audio_path, source_lang="ta")
-        logger.info(f"[{job_id}] Transcript: {original_text[:100]}…")
+        original_text, detected_lang = transcribe(audio_path, source_lang="auto")
+        logger.info(f"[{job_id}] Detected language: {detected_lang}. Transcript: {original_text[:100]}…")
 
         # Step 3 — Translate
         from services.translate import translate
-        logger.info(f"[{job_id}] Step 3/6: Translating ta → {target_lang} …")
-        translated_text = translate(original_text, source_lang="ta", target_lang=target_lang)
+        logger.info(f"[{job_id}] Step 3/6: Translating {detected_lang} → {target_lang} …")
+        translated_text = translate(original_text, source_lang=detected_lang, target_lang=target_lang)
         logger.info(f"[{job_id}] Translation: {translated_text[:100]}…")
 
-        # Step 4 — Create voice reference clip (first 8 sec, silence trimmed by ffmpeg)
-        logger.info(f"[{job_id}] Step 4/6: Creating voice reference clip …")
-        ref_clip_path = trim_audio(audio_path, duration_sec=8.0)
+        # Step 4 — Condition on speaker vocal track
+        logger.info(f"[{job_id}] Step 4/6: Isolating optimal speaker vocal reference …")
 
         # Step 5 — Voice clone + TTS
         from services.voice_clone import clone_and_speak
-        logger.info(f"[{job_id}] Step 5/6: Synthesizing dubbed audio …")
+        logger.info(f"[{job_id}] Step 5/6: Synthesizing dubbed audio via VoxAI Engine …")
         dubbed_wav = clone_and_speak(
-            reference_audio_path=ref_clip_path,
+            reference_audio_path=audio_path,
             text=translated_text,
             target_lang=target_lang,
         )
