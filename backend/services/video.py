@@ -14,6 +14,9 @@ import ffmpeg
 
 logger = logging.getLogger(__name__)
 
+# Safely reference ffmpeg-python Error class
+FFmpegError = getattr(ffmpeg, "Error", Exception)
+
 OUTPUTS_DIR = os.environ.get("OUTPUTS_DIR", "outputs")
 os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
@@ -53,10 +56,9 @@ def extract_audio(video_path: str, output_wav: str | None = None) -> str:
             .overwrite_output()
             .run(quiet=True)
         )
-    except ffmpeg.Error as exc:
-        raise RuntimeError(
-            f"ffmpeg audio extraction failed: {exc.stderr.decode() if exc.stderr else str(exc)}"
-        ) from exc
+    except FFmpegError as exc:
+        err_msg = exc.stderr.decode(errors="replace") if getattr(exc, "stderr", None) else str(exc)
+        raise RuntimeError(f"ffmpeg audio extraction failed: {err_msg}") from exc
 
     logger.info(f"Audio extracted to '{output_wav}'.")
     return output_wav
@@ -83,7 +85,7 @@ def trim_audio(audio_path: str, duration_sec: float = 8.0, output_path: str | No
             .overwrite_output()
             .run(quiet=True)
         )
-    except ffmpeg.Error as exc:
+    except FFmpegError as exc:
         logger.warning(f"Filtered trim failed, falling back to basic trim: {exc}")
         (
             ffmpeg
@@ -158,21 +160,46 @@ def replace_audio(video_path: str, new_audio_path: str, output_path: str | None 
             "t": use_dur,
         }
 
-        (
-            ffmpeg
-            .output(
-                video_in.video,
-                audio_input,
-                output_path,
-                **kwargs,
+        try:
+            (
+                ffmpeg
+                .output(
+                    video_in.video,
+                    audio_input,
+                    output_path,
+                    **kwargs,
+                )
+                .overwrite_output()
+                .run(quiet=True)
             )
-            .overwrite_output()
-            .run(quiet=True)
-        )
-    except ffmpeg.Error as exc:
-        raise RuntimeError(
-            f"ffmpeg remux failed: {exc.stderr.decode() if exc.stderr else str(exc)}"
-        ) from exc
+        except FFmpegError as copy_exc:
+            logger.warning(
+                f"Direct stream copy remux failed ({copy_exc}), falling back to libx264 transcode for compatibility..."
+            )
+            fallback_kwargs = {
+                "vcodec": "libx264",
+                "preset": "ultrafast",
+                "crf": 22,
+                "pix_fmt": "yuv420p",
+                "acodec": "aac",
+                "ar": "44100",
+                "b:a": "192k",
+                "t": use_dur,
+            }
+            (
+                ffmpeg
+                .output(
+                    video_in.video,
+                    audio_input,
+                    output_path,
+                    **fallback_kwargs,
+                )
+                .overwrite_output()
+                .run(quiet=True)
+            )
+    except FFmpegError as exc:
+        err_msg = exc.stderr.decode(errors="replace") if getattr(exc, "stderr", None) else str(exc)
+        raise RuntimeError(f"ffmpeg remux failed: {err_msg}") from exc
 
     logger.info(f"Remux complete: '{output_path}'.")
     return output_path

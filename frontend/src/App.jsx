@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { fetchLanguages, uploadVideo, getJobStatus, getDownloadUrl } from "./api";
+import CameraRecorder from "./components/CameraRecorder";
 import {
   Video,
   UploadCloud,
@@ -18,6 +19,7 @@ import {
   FileVideo,
   Layers,
   ArrowRight,
+  Camera,
 } from "lucide-react";
 
 // Pipeline steps with professional icons and zero emojis
@@ -56,7 +58,9 @@ export default function App() {
   const [langsError, setLangsError] = useState(null);
 
   // Form state
+  const [inputMode, setInputMode] = useState("upload"); // 'upload' | 'camera'
   const [videoFile, setVideoFile] = useState(null);
+  const [isRecordedClip, setIsRecordedClip] = useState(false);
   const [previewUrl, setPreviewUrl] = useState(null);
   const [targetLang, setTargetLang] = useState("");
   const [dragOver, setDragOver] = useState(false);
@@ -123,7 +127,14 @@ export default function App() {
       alert("Please upload a valid video file (MP4, MOV, WebM).");
       return;
     }
+    setIsRecordedClip(false);
     setVideoFile(file);
+  }, []);
+
+  const handleRecordingComplete = useCallback((file) => {
+    setIsRecordedClip(true);
+    setVideoFile(file);
+    setInputMode("upload");
   }, []);
 
   const handleDrop = useCallback(
@@ -191,6 +202,7 @@ export default function App() {
     clearInterval(pollIntervalRef.current);
     clearTimeout(slowTimerRef.current);
     setVideoFile(null);
+    setIsRecordedClip(false);
     setJobId(null);
     setJobStatus("idle");
     setErrorMsg(null);
@@ -284,44 +296,88 @@ export default function App() {
             </div>
 
             {!videoFile ? (
-              <div
-                id="dropzone"
-                className={`dropzone ${dragOver ? "drag-over" : ""}`}
-                onClick={() => fileInputRef.current?.click()}
-                onDrop={handleDrop}
-                onDragOver={handleDragOver}
-                onDragLeave={handleDragLeave}
-                role="button"
-                tabIndex={0}
-                aria-label="Upload video file"
-                onKeyDown={(e) => e.key === "Enter" && fileInputRef.current?.click()}
-              >
-                <div className="dropzone-icon-circle">
-                  <UploadCloud size={28} strokeWidth={2} />
+              <div>
+                {/* Switcher: Upload File vs Live Camera */}
+                <div className="source-mode-switcher">
+                  <button
+                    type="button"
+                    className={`source-mode-btn ${inputMode === "upload" ? "active" : ""}`}
+                    onClick={() => setInputMode("upload")}
+                    aria-label="Upload Video File"
+                  >
+                    <UploadCloud size={16} />
+                    <span>Upload Video File</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`source-mode-btn ${inputMode === "camera" ? "active" : ""}`}
+                    onClick={() => setInputMode("camera")}
+                    aria-label="Open Live Camera"
+                  >
+                    <Camera size={16} />
+                    <span>Open Live Camera</span>
+                    <span className="source-mode-badge">Live</span>
+                  </button>
                 </div>
-                <div>
-                  <p className="dropzone-heading">Drop your video here, or browse device</p>
-                  <p className="dropzone-subtext">Click anywhere in this area to select your clip</p>
-                </div>
-                <span className="dropzone-format-badge">MP4, MOV, WebM · Up to 60s Recommended</span>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  id="video-file-input"
-                  accept="video/*"
-                  style={{ display: "none" }}
-                  onChange={(e) => handleFileSelect(e.target.files?.[0])}
-                />
+
+                {inputMode === "camera" ? (
+                  <CameraRecorder
+                    onRecordingComplete={handleRecordingComplete}
+                    onCancel={() => setInputMode("upload")}
+                  />
+                ) : (
+                  <div
+                    id="dropzone"
+                    className={`dropzone ${dragOver ? "drag-over" : ""}`}
+                    onClick={() => fileInputRef.current?.click()}
+                    onDrop={handleDrop}
+                    onDragOver={handleDragOver}
+                    onDragLeave={handleDragLeave}
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Upload video file"
+                    onKeyDown={(e) => e.key === "Enter" && fileInputRef.current?.click()}
+                  >
+                    <div className="dropzone-icon-circle">
+                      <UploadCloud size={28} strokeWidth={2} />
+                    </div>
+                    <div>
+                      <p className="dropzone-heading">Drop your video here, or browse device</p>
+                      <p className="dropzone-subtext">Click anywhere in this area to select your clip</p>
+                    </div>
+                    <span className="dropzone-format-badge">MP4, MOV, WebM · Up to 60s Recommended</span>
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      id="video-file-input"
+                      accept="video/*"
+                      style={{ display: "none" }}
+                      onChange={(e) => handleFileSelect(e.target.files?.[0])}
+                    />
+                  </div>
+                )}
               </div>
             ) : (
               <div>
                 <div className="file-preview-card">
                   <div className="file-preview-left">
                     <div className="file-preview-thumbnail">
-                      <Film size={22} strokeWidth={2.2} />
+                      {isRecordedClip ? (
+                        <Camera size={22} strokeWidth={2.2} />
+                      ) : (
+                        <Film size={22} strokeWidth={2.2} />
+                      )}
                     </div>
                     <div className="file-meta-content">
-                      <span className="file-meta-name" title={videoFile.name}>{videoFile.name}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                        <span className="file-meta-name" title={videoFile.name}>{videoFile.name}</span>
+                        {isRecordedClip && (
+                          <span className="live-badge-card">
+                            <span className="badge-pulse-dot" style={{ width: 6, height: 6 }} />
+                            Live Camera
+                          </span>
+                        )}
+                      </div>
                       <div className="file-meta-sub">
                         <span>{formatBytes(videoFile.size)}</span>
                         <span>•</span>
@@ -333,7 +389,10 @@ export default function App() {
                     <button
                       type="button"
                       className="btn-remove-file"
-                      onClick={() => setVideoFile(null)}
+                      onClick={() => {
+                        setVideoFile(null);
+                        setIsRecordedClip(false);
+                      }}
                       aria-label="Remove video file"
                     >
                       <Trash2 size={14} strokeWidth={2} />

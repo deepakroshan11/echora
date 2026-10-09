@@ -2,10 +2,11 @@
 app.py — Echora FastAPI backend
 
 Endpoints:
-  POST /upload          — accept video + target_language, queue job
-  GET  /status/{job_id} — poll job status
-  GET  /download/{job_id} — stream completed output.mp4
-  GET  /languages        — list of supported target languages
+#   POST /upload          — accept video + target_language, queue job
+#   GET  /status/{job_id} — poll job status
+#   GET  /download/{job_id} — stream completed output.mp4
+#   GET  /languages        — list of supported target languages
+# Updated dependencies: torchvision 0.21.0, chatterbox-tts, edge-tts & ffmpeg-python ready
 """
 import asyncio
 import logging
@@ -135,7 +136,14 @@ async def upload_video(
 
     # Save uploaded video
     job_id = str(uuid.uuid4())
-    ext = Path(video.filename).suffix if video.filename else ".mp4"
+    ext = Path(video.filename).suffix.lower() if (video.filename and Path(video.filename).suffix) else ""
+    if not ext:
+        if video.content_type and "webm" in video.content_type:
+            ext = ".webm"
+        elif video.content_type and "quicktime" in video.content_type:
+            ext = ".mov"
+        else:
+            ext = ".mp4"
     video_filename = f"{job_id}_input{ext}"
     video_path = os.path.join(UPLOADS_DIR, video_filename)
 
